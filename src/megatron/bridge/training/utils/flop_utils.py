@@ -351,9 +351,9 @@ def _looped_adapter_flops(cfg, seqlen_sum: int) -> int:
     iteration (mathematically one 2h -> h GEMM on the concatenation); "none" is
     parameter-free and costs nothing measurable here.
 
-    The adapter is only built when *both* ``looped_state_noise_init`` and
-    ``looped_reinject_embed`` are on (see LoopedTransformerBlock); with either off
-    there is no mixer, so it contributes no FLOPs regardless of injection mode.
+    The adapter is built when ``looped_step_injection`` is "e" (mixes e) or
+    "timestep" (mixes the depth marker); "none" drops it (see
+    LoopedTransformerBlock). "none" injection mode also drops it regardless.
 
     Factor 3 covers forward + backward; factor 2 turns MACs into FLOPs.
     """
@@ -361,12 +361,9 @@ def _looped_adapter_flops(cfg, seqlen_sum: int) -> int:
         return 0
     if cfg.model.looped_input_injection != "concat":
         return 0
-    # Mirror the block's adapter-active predicate (both default True): zeroes the
-    # term for the noise-off / reinject-off ablations that drop the adapter.
-    if not (
-        getattr(cfg.model, "looped_state_noise_init", True)
-        and getattr(cfg.model, "looped_reinject_embed", True)
-    ):
+    # Mirror the block's adapter-active predicate: the adapter exists iff a
+    # per-step signal is mixed ("e" or "timestep"); "none" is a bare self-map.
+    if getattr(cfg.model, "looped_step_injection", "e") not in ("e", "timestep"):
         return 0
     return 3 * 2 * seqlen_sum * 2 * cfg.model.hidden_size**2 * cfg.model.looped_num_recurrence
 
