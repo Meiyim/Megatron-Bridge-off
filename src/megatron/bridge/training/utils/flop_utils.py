@@ -362,10 +362,30 @@ def _looped_adapter_flops(cfg, seqlen_sum: int) -> int:
     if cfg.model.looped_input_injection != "concat":
         return 0
     # Mirror the block's adapter-active predicate: the adapter exists iff a
-    # per-step signal is mixed ("e" or "timestep"); "none" is a bare self-map.
+    # per-step signal is mixed ("e" or "timestep"); "none" is a bare self-map and
+    # "adaln" conditions per-layer modulation MLPs (per-step-per-layer on one
+    # vector, no per-token GEMM) -- both incur no adapter FLOP here.
     if getattr(cfg.model, "looped_step_injection", "e") not in ("e", "timestep"):
         return 0
     return 3 * 2 * seqlen_sum * 2 * cfg.model.hidden_size**2 * cfg.model.looped_num_recurrence
+
+
+def _looped_adaln_content_flops(cfg, seqlen_sum: int) -> int:
+    """FLOPs from the content-dependent adaLN heads (Variant D2), across all r steps.
+
+    Each recurrent-core layer carries two per-token modulation heads (attn + mlp),
+    each a ``Linear(h, 2h)`` (2h^2 MACs/token). Over ``l_R`` core layers and ``r``
+    steps that is ``4 h^2 * l_R * r`` MACs/token. D (per-step, per-vector) and every
+    non-adaln mode incur nothing here. Factor 3 = fwd + bwd; factor 2 = MACs -> FLOPs.
+    """
+    if not getattr(cfg.model, "looped_enable", False):
+        return 0
+    if getattr(cfg.model, "looped_step_injection", "e") != "adaln" or not getattr(
+        cfg.model, "looped_adaln_content", False
+    ):
+        return 0
+    l_r = cfg.model.num_layers - cfg.model.looped_prelude_layers - cfg.model.looped_coda_layers
+    return 3 * 2 * seqlen_sum * (4 * cfg.model.hidden_size**2) * l_r * cfg.model.looped_num_recurrence
 
 
 def num_floating_point_operations(
@@ -1116,6 +1136,8 @@ def num_floating_point_operations(
         # Looped-transformer adapter: r extra (2h -> h) mixes, outside the
         # per-layer terms above because it is a block-level module.
         total_floating_point_operations += _looped_adapter_flops(cfg, seqlen_sum)
+        # Variant D2: per-token content-dependent adaLN modulation heads.
+        total_floating_point_operations += _looped_adaln_content_flops(cfg, seqlen_sum)
         return total_floating_point_operations + _compute_vit_flops()
 
     def _compute_vit_flops():
